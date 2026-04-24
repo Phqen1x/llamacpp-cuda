@@ -245,6 +245,29 @@ jobs:
           echo "RPATH patching complete."
 
       # -----------------------------------------------------------------------
+      # Strip debug symbols to shrink binaries and bundled CUDA .so files.
+      # --strip-unneeded is safe for shared libs: keeps symbols needed for
+      # dynamic linking but drops debug info and local symbols.
+      # -----------------------------------------------------------------------
+      - name: Strip debug symbols
+        run: |
+          build_bin_path="llama.cpp/build/bin"
+
+          echo "=== Sizes before stripping ==="
+          du -sh "${build_bin_path}"
+
+          for file in "${build_bin_path}"/*; do
+            if [ -f "${file}" ] && ! [ -L "${file}" ]; then
+              if file "${file}" | grep -qE 'ELF.*(executable|shared object)'; then
+                strip --strip-unneeded "${file}" 2>/dev/null || true
+              fi
+            fi
+          done
+
+          echo "=== Sizes after stripping ==="
+          du -sh "${build_bin_path}"
+
+      # -----------------------------------------------------------------------
       # List build artifacts for verification
       # -----------------------------------------------------------------------
       - name: List build artifacts
