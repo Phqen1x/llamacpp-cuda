@@ -121,6 +121,8 @@ cd llama.cpp/build/bin
 | `sm_86` | Ampere (consumer) | `"86"` | RTX 3060/3070/3080/3090, A10, A40, A5000, A6000, A4000 |
 | `sm_89` | Ada Lovelace | `"89"` | RTX 4060/4070/4080/4090, L4, L40S, RTX Ada workstation |
 | `sm_90` | Hopper | `"90"` | H100, H200 |
+| `sm_100` | Blackwell (data center) | `"100"` | B100, B200, GB200 |
+| `sm_120` | Blackwell (consumer) | `"120"` | RTX 5060/5070/5080/5090 |
 
 To target a specific GPU, pass its CMake value to `-DCMAKE_CUDA_ARCHITECTURES`. For example,
 for an RTX 3090 (sm_86):

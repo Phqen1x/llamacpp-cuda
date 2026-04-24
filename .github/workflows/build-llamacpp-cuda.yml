@@ -11,12 +11,12 @@ on:
       sm_targets:
         description: "CUDA sm_ targets to build for (comma-separated)"
         required: false
-        default: "sm_75,sm_80,sm_86,sm_89,sm_90"
+        default: "sm_75,sm_80,sm_86,sm_89,sm_90,sm_100,sm_120"
         type: string
       cuda_version:
-        description: "CUDA Toolkit version to install (e.g. '12-6', or 'latest')"
+        description: "CUDA Toolkit version to install (e.g. '12-8', or 'latest')"
         required: false
-        default: "12-6"
+        default: "12-8"
         type: string
       llamacpp_version:
         description: "llama.cpp version to build ('latest' for master, or a branch/tag)"
@@ -38,8 +38,8 @@ on:
 
 env:
   OPERATING_SYSTEMS: ${{ github.event.inputs.operating_systems || 'ubuntu' }}
-  SM_TARGETS: ${{ github.event.inputs.sm_targets || 'sm_75,sm_80,sm_86,sm_89,sm_90' }}
-  CUDA_VERSION: ${{ github.event.inputs.cuda_version || '12-6' }}
+  SM_TARGETS: ${{ github.event.inputs.sm_targets || 'sm_75,sm_80,sm_86,sm_89,sm_90,sm_100,sm_120' }}
+  CUDA_VERSION: ${{ github.event.inputs.cuda_version || '12-8' }}
   LLAMACPP_VERSION: ${{ github.event.inputs.llamacpp_version || 'latest' }}
 
 jobs:

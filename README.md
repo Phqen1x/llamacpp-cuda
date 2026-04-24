@@ -26,6 +26,8 @@ Fresh builds of [llama.cpp](https://github.com/ggml-org/llama.cpp) with NVIDIA C
 | `sm_86` | Ampere (consumer) | RTX 3060/3070/3080/3090, A10, A40, A5000, A6000 |
 | `sm_89` | Ada Lovelace | RTX 4060/4070/4080/4090, L4, L40S |
 | `sm_90` | Hopper | H100, H200 |
+| `sm_100` | Blackwell (data center) | B100, B200, GB200 |
+| `sm_120` | Blackwell (consumer) | RTX 5060/5070/5080/5090 |
 
 > **Note on `libcuda.so`:** Unlike the toolkit libraries bundled in each release,
 > `libcuda.so` is part of the NVIDIA driver and **cannot be redistributed**. A compatible
