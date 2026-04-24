@@ -415,20 +415,20 @@ jobs:
           build_date="${{ steps.metadata.outputs.build_date }}"
           sm_targets="${SM_TARGETS}"
 
-          # Build release body (mirrors llamacpp-rocm format)
-          release_body=$(cat <<RELEASEBODY
-Build Number: ${next_tag}
-Operating System(s): ubuntu
-GPU Target(s): ${sm_targets}
-CUDA Version: ${cuda_ver}
-Llama.cpp Commit Hash: ${commit}
-Build Date: ${build_date}
-
-This release includes compiled llama.cpp binaries with CUDA support for multiple
-GPU targets, with essential CUDA runtime libraries (libcublas, libcublasLt, libcurand)
-included. NVIDIA drivers must be installed separately (libcuda.so is not bundled).
-RELEASEBODY
-          )
+          # Write release notes to a temp file to avoid YAML/heredoc quoting issues
+          notes_file=$(mktemp)
+          {
+            echo "Build Number: ${next_tag}"
+            echo "Operating System(s): ubuntu"
+            echo "GPU Target(s): ${sm_targets}"
+            echo "CUDA Version: ${cuda_ver}"
+            echo "Llama.cpp Commit Hash: ${commit}"
+            echo "Build Date: ${build_date}"
+            echo ""
+            echo "This release includes compiled llama.cpp binaries with CUDA support for multiple"
+            echo "GPU targets, with essential CUDA runtime libraries (libcublas, libcublasLt, libcurand)"
+            echo "included. NVIDIA drivers must be installed separately (libcuda.so is not bundled)."
+          } > "${notes_file}"
 
           # Collect zip files from all artifact directories
           zip_files=()
@@ -450,7 +450,7 @@ RELEASEBODY
 
           gh release create "${next_tag}" \
             --title "llamacpp-cuda ${next_tag}" \
-            --notes "${release_body}" \
+            --notes-file "${notes_file}" \
             "${zip_files[@]}"
 
           echo "Release ${next_tag} created successfully."
