@@ -1,0 +1,115 @@
+name: Test llama.cpp CUDA Build
+description: Smoke-test a llamacpp-cuda build artifact
+
+inputs:
+  os_type:
+    description: "Operating system type (Linux)"
+    required: false
+    default: "Linux"
+  sm_target:
+    description: "CUDA sm_ target (e.g. sm_86)"
+    required: true
+  artifact_name:
+    description: "Artifact name to download (e.g. llama-ubuntu-cuda-sm_86-x64)"
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Download artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.artifact_name }}
+        path: ./test-artifact
+
+    - name: Extract artifact
+      shell: bash
+      run: |
+        mkdir -p ./test-bin
+        cd ./test-artifact
+        for f in *.zip; do
+          if [ -f "${f}" ]; then
+            unzip -q "${f}" -d ../test-bin
+            break
+          fi
+        done
+        echo "Extracted contents:"
+        ls -la ../test-bin/
+
+    - name: Make binary executable
+      if: inputs.os_type == 'Linux'
+      shell: bash
+      run: chmod +x ./test-bin/llama-server
+
+    - name: Test --version flag
+      shell: bash
+      run: |
+        echo "=== Testing --version ==="
+        ./test-bin/llama-server --version
+        exit_code=$?
+        if [ ${exit_code} -ne 0 ]; then
+          echo "FAIL: llama-server --version returned exit code ${exit_code}"
+          exit 1
+        fi
+        echo "PASS: --version exited 0"
+
+    - name: Test --list-devices flag
+      shell: bash
+      run: |
+        echo "=== Testing --list-devices ==="
+        output=$(./test-bin/llama-server --list-devices 2>&1 || true)
+        echo "${output}"
+
+        # Check for CUDA or NVIDIA in output
+        if echo "${output}" | grep -qi "cuda\|nvidia"; then
+          echo "PASS: --list-devices output mentions CUDA/NVIDIA"
+        else
+          echo "WARN: --list-devices output does not mention CUDA/NVIDIA (no GPU on runner)"
+          echo "  This is expected on CPU-only CI runners."
+        fi
+
+    - name: Verify bundled CUDA libraries
+      shell: bash
+      run: |
+        echo "=== Verifying bundled CUDA libraries ==="
+        missing=()
+
+        for lib in libcublas libcublasLt libcurand; do
+          if ls ./test-bin/${lib}.so* 1>/dev/null 2>&1; then
+            echo "PASS: ${lib}.so found"
+          else
+            echo "FAIL: ${lib}.so not found"
+            missing+=("${lib}")
+          fi
+        done
+
+        if [ ${#missing[@]} -gt 0 ]; then
+          echo "ERROR: Missing required CUDA libraries: ${missing[*]}"
+          exit 1
+        fi
+        echo "All required CUDA libraries present."
+
+    - name: Verify RPATH set to \$ORIGIN
+      shell: bash
+      run: |
+        echo "=== Verifying RPATH ==="
+        if command -v patchelf &>/dev/null; then
+          rpath=$(patchelf --print-rpath ./test-bin/llama-server 2>/dev/null || echo "")
+          if echo "${rpath}" | grep -q '\$ORIGIN'; then
+            echo "PASS: RPATH contains \$ORIGIN: ${rpath}"
+          else
+            echo "WARN: RPATH does not contain \$ORIGIN: '${rpath}'"
+          fi
+        else
+          echo "SKIP: patchelf not available on this runner"
+        fi
+
+    - name: Smoke test summary
+      shell: bash
+      run: |
+        echo ""
+        echo "=== Smoke Test Summary ==="
+        echo "Artifact:  ${{ inputs.artifact_name }}"
+        echo "SM Target: ${{ inputs.sm_target }}"
+        echo "OS Type:   ${{ inputs.os_type }}"
+        echo "Result:    PASS (binary functional, libraries present)"

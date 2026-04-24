@@ -1,0 +1,453 @@
+name: Build Llama.cpp + CUDA
+
+on:
+  workflow_dispatch:
+    inputs:
+      operating_systems:
+        description: "Operating systems to build for (comma-separated)"
+        required: false
+        default: "ubuntu"
+        type: string
+      sm_targets:
+        description: "CUDA sm_ targets to build for (comma-separated)"
+        required: false
+        default: "sm_75,sm_80,sm_86,sm_89,sm_90"
+        type: string
+      cuda_version:
+        description: "CUDA Toolkit version to install (e.g. '12-6', or 'latest')"
+        required: false
+        default: "12-6"
+        type: string
+      llamacpp_version:
+        description: "llama.cpp version to build ('latest' for master, or a branch/tag)"
+        required: false
+        default: "latest"
+        type: string
+      create_release:
+        description: "Create a GitHub release with built artifacts"
+        required: false
+        default: true
+        type: boolean
+
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+  schedule:
+    # 3:00 PM UTC daily — two hours after CUDA toolkit nightly builds settle
+    - cron: "0 15 * * *"
+
+env:
+  OPERATING_SYSTEMS: ${{ github.event.inputs.operating_systems || 'ubuntu' }}
+  SM_TARGETS: ${{ github.event.inputs.sm_targets || 'sm_75,sm_80,sm_86,sm_89,sm_90' }}
+  CUDA_VERSION: ${{ github.event.inputs.cuda_version || '12-6' }}
+  LLAMACPP_VERSION: ${{ github.event.inputs.llamacpp_version || 'latest' }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Parse inputs into build matrices
+  # ---------------------------------------------------------------------------
+  prepare-matrix:
+    runs-on: ubuntu-24.04
+    outputs:
+      ubuntu_matrix: ${{ steps.set-matrix.outputs.ubuntu_matrix }}
+      should_build_ubuntu: ${{ steps.set-matrix.outputs.should_build_ubuntu }}
+
+    steps:
+      - name: Parse build matrix from inputs
+        id: set-matrix
+        shell: bash
+        run: |
+          # Parse SM_TARGETS into a JSON array for the matrix
+          sm_targets="${SM_TARGETS}"
+          ubuntu_matrix="[]"
+          should_build_ubuntu="false"
+
+          IFS=',' read -ra targets <<< "${sm_targets}"
+          ubuntu_entries="[]"
+          for target in "${targets[@]}"; do
+            target=$(echo "${target}" | xargs)  # trim whitespace
+            if [ -n "${target}" ]; then
+              ubuntu_entries=$(echo "${ubuntu_entries}" | \
+                python3 -c "import sys, json; a=json.load(sys.stdin); a.append({'sm_target':'${target}'}); print(json.dumps(a))")
+            fi
+          done
+
+          if echo "${OPERATING_SYSTEMS}" | grep -q "ubuntu"; then
+            ubuntu_matrix="${ubuntu_entries}"
+            should_build_ubuntu="true"
+          fi
+
+          echo "ubuntu_matrix=${ubuntu_matrix}" >> "$GITHUB_OUTPUT"
+          echo "should_build_ubuntu=${should_build_ubuntu}" >> "$GITHUB_OUTPUT"
+          echo "Ubuntu matrix: ${ubuntu_matrix}"
+
+  # ---------------------------------------------------------------------------
+  # Ubuntu build job (matrix over sm_target)
+  # ---------------------------------------------------------------------------
+  build-ubuntu:
+    needs: prepare-matrix
+    if: needs.prepare-matrix.outputs.should_build_ubuntu == 'true'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.prepare-matrix.outputs.ubuntu_matrix) }}
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Free disk space — CUDA toolkit is large; runners need the headroom
+      # -----------------------------------------------------------------------
+      - name: Free disk space
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/apache/flink/02d30ace69dc18555a5085eccf70ee884e73a16e/tools/azure-pipelines/free_disk_space.sh | bash
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Clean any leftover build artifacts from previous runs
+      # -----------------------------------------------------------------------
+      - name: Clean up existing directories
+        run: |
+          rm -rf llama.cpp
+          rm -rf build
+
+      # -----------------------------------------------------------------------
+      # Install build toolchain
+      # -----------------------------------------------------------------------
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build patchelf git wget
+
+      # -----------------------------------------------------------------------
+      # Install CUDA Toolkit from NVIDIA network repo
+      # ubuntu2204 repo works on ubuntu-24.04 runners for toolkit packages
+      # -----------------------------------------------------------------------
+      - name: Install CUDA Toolkit
+        run: |
+          cuda_ver="${CUDA_VERSION}"
+
+          # Install NVIDIA CUDA network repo keyring
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update
+
+          if [ "${cuda_ver}" = "latest" ]; then
+            # Install whichever cuda-toolkit is highest in the repo
+            sudo apt-get install -y cuda-toolkit
+          else
+            sudo apt-get install -y "cuda-toolkit-${cuda_ver}"
+          fi
+
+          # Verify
+          nvcc --version
+
+      # -----------------------------------------------------------------------
+      # Set CUDA environment variables for subsequent steps
+      # -----------------------------------------------------------------------
+      - name: Set CUDA environment
+        run: |
+          echo "CUDA_PATH=/usr/local/cuda" >> "$GITHUB_ENV"
+          echo "/usr/local/cuda/bin" >> "$GITHUB_PATH"
+          echo "LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+
+      # -----------------------------------------------------------------------
+      # Detect installed CUDA version for the release body
+      # -----------------------------------------------------------------------
+      - name: Detect CUDA version
+        id: detect-cuda
+        run: |
+          detected=$(nvcc --version | grep -oP 'release \K[0-9]+\.[0-9]+' || echo "unknown")
+          echo "cuda_version=${detected}" >> "$GITHUB_OUTPUT"
+          echo "Detected CUDA version: ${detected}"
+
+      # -----------------------------------------------------------------------
+      # Clone llama.cpp — respect llamacpp_version input
+      # -----------------------------------------------------------------------
+      - name: Clone llama.cpp
+        run: |
+          if [ "${LLAMACPP_VERSION}" = "latest" ]; then
+            git clone --depth 1 https://github.com/ggml-org/llama.cpp.git
+          else
+            git clone --depth 1 --branch "${LLAMACPP_VERSION}" \
+              https://github.com/ggml-org/llama.cpp.git
+          fi
+
+          # Store 5-character commit hash for release metadata
+          commit_hash=$(git -C llama.cpp rev-parse --short=5 HEAD)
+          echo "LLAMACPP_COMMIT_HASH=${commit_hash}" >> "$GITHUB_ENV"
+          echo "llama.cpp commit: ${commit_hash}"
+
+      # -----------------------------------------------------------------------
+      # Map sm_target to the numeric CUDA architecture value for CMake
+      # -----------------------------------------------------------------------
+      - name: Map sm_target to CMake architecture
+        id: map-arch
+        run: |
+          sm_target="${{ matrix.sm_target }}"
+          # Strip leading "sm_" to get the numeric value (e.g., sm_86 -> 86)
+          cmake_arch="${sm_target#sm_}"
+          echo "cmake_arch=${cmake_arch}" >> "$GITHUB_OUTPUT"
+          echo "Building for sm_target=${sm_target}, cmake_arch=${cmake_arch}"
+
+      # -----------------------------------------------------------------------
+      # Build llama.cpp with CUDA
+      # -----------------------------------------------------------------------
+      - name: Build llama.cpp + CUDA
+        run: |
+          cmake_arch="${{ steps.map-arch.outputs.cmake_arch }}"
+
+          cmake -S llama.cpp -B llama.cpp/build -G Ninja \
+            -DGGML_CUDA=ON \
+            -DCMAKE_CUDA_ARCHITECTURES="${cmake_arch}" \
+            -DBUILD_SHARED_LIBS=ON \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DGGML_OPENMP=OFF \
+            -DGGML_NATIVE=OFF \
+            -DGGML_STATIC=OFF \
+            -DGGML_RPC=ON \
+            -DLLAMA_BUILD_BORINGSSL=ON \
+            -DCMAKE_BUILD_TYPE=Release
+
+          cmake --build llama.cpp/build --config Release -j$(nproc)
+
+      # -----------------------------------------------------------------------
+      # Copy required CUDA runtime libraries into build/bin
+      # libcuda.so is driver-provided and must NOT be bundled
+      # -----------------------------------------------------------------------
+      - name: Copy required CUDA libraries
+        run: |
+          build_bin_path="llama.cpp/build/bin"
+          cuda_lib_path="/usr/local/cuda/lib64"
+
+          echo "Copying CUDA runtime libraries from ${cuda_lib_path} to ${build_bin_path}"
+
+          cp -v "${cuda_lib_path}"/libcublas.so*   "${build_bin_path}/" 2>/dev/null \
+            || echo "Warning: libcublas.so not found at ${cuda_lib_path}"
+          cp -v "${cuda_lib_path}"/libcublasLt.so* "${build_bin_path}/" 2>/dev/null \
+            || echo "Warning: libcublasLt.so not found at ${cuda_lib_path}"
+          cp -v "${cuda_lib_path}"/libcurand.so*   "${build_bin_path}/" 2>/dev/null \
+            || echo "Warning: libcurand.so not found at ${cuda_lib_path}"
+
+          echo ""
+          echo "Note: libcuda.so is provided by the NVIDIA driver and is NOT bundled."
+
+      # -----------------------------------------------------------------------
+      # Set RPATH to $ORIGIN for portable distribution (no LD_LIBRARY_PATH needed)
+      # -----------------------------------------------------------------------
+      - name: Set RPATH for portable distribution
+        run: |
+          build_bin_path="llama.cpp/build/bin"
+
+          for file in "${build_bin_path}"/*.so* "${build_bin_path}"/llama-*; do
+            if [ -f "${file}" ] && ! [ -L "${file}" ]; then
+              patchelf --set-rpath '$ORIGIN' "${file}" 2>/dev/null || true
+            fi
+          done
+
+          echo "RPATH patching complete."
+
+      # -----------------------------------------------------------------------
+      # List build artifacts for verification
+      # -----------------------------------------------------------------------
+      - name: List build artifacts
+        run: |
+          echo "=== Build artifacts ==="
+          ls -la llama.cpp/build/bin/
+          echo ""
+          echo "=== CUDA libraries bundled ==="
+          ls -la llama.cpp/build/bin/libcu*.so* 2>/dev/null || echo "No libcu*.so* found"
+
+      # -----------------------------------------------------------------------
+      # Package artifacts into a zip
+      # -----------------------------------------------------------------------
+      - name: Package artifacts
+        run: |
+          sm_target="${{ matrix.sm_target }}"
+          artifact_name="llama-ubuntu-cuda-${sm_target}-x64"
+          zip_name="${artifact_name}.zip"
+
+          cd llama.cpp/build/bin
+          zip -r "../../../${zip_name}" .
+
+          echo "ARTIFACT_ZIP=${zip_name}" >> "$GITHUB_ENV"
+          echo "ARTIFACT_NAME=${artifact_name}" >> "$GITHUB_ENV"
+          echo "Packaged: ${zip_name}"
+
+      # -----------------------------------------------------------------------
+      # Upload build artifact (available for 7 days)
+      # -----------------------------------------------------------------------
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.ARTIFACT_ZIP }}
+          retention-days: 7
+
+      # -----------------------------------------------------------------------
+      # Set job outputs for use by the create-release job
+      # -----------------------------------------------------------------------
+      - name: Set job outputs
+        id: job-outputs
+        run: |
+          echo "cuda_version=${{ steps.detect-cuda.outputs.cuda_version }}" >> "$GITHUB_OUTPUT"
+          echo "llamacpp_commit_hash=${LLAMACPP_COMMIT_HASH}" >> "$GITHUB_OUTPUT"
+
+      # -----------------------------------------------------------------------
+      # Create per-build summary markdown artifact (aggregated by create-release)
+      # -----------------------------------------------------------------------
+      - name: Create build summary
+        run: |
+          sm_target="${{ matrix.sm_target }}"
+          summary_file="summary-ubuntu-${sm_target}.md"
+
+          cat > "${summary_file}" <<EOF
+          ## Build: ubuntu / ${sm_target}
+          - **OS:** Ubuntu
+          - **GPU Target:** ${sm_target}
+          - **CUDA Version:** ${{ steps.detect-cuda.outputs.cuda_version }}
+          - **llama.cpp Commit:** ${LLAMACPP_COMMIT_HASH}
+          - **Build Date:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          EOF
+
+          echo "Summary written to ${summary_file}"
+
+      - name: Upload build summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: summary-ubuntu-${{ matrix.sm_target }}
+          path: summary-ubuntu-${{ matrix.sm_target }}.md
+          retention-days: 7
+
+      # -----------------------------------------------------------------------
+      # Always clean up to recover disk space on shared runners
+      # -----------------------------------------------------------------------
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -rf llama.cpp build *.zip *.deb *.md 2>/dev/null || true
+          df -h
+
+  # ---------------------------------------------------------------------------
+  # Create GitHub release — runs after all build jobs complete
+  # ---------------------------------------------------------------------------
+  create-release:
+    needs: [prepare-matrix, build-ubuntu]
+    # Run if: not a PR, all completed (regardless of result), and create_release=true
+    if: |
+      always() &&
+      github.event_name != 'pull_request' &&
+      (github.event.inputs.create_release == 'true' || github.event.inputs.create_release == null) &&
+      (needs.build-ubuntu.result == 'success')
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Download all build artifacts
+      # -----------------------------------------------------------------------
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      # -----------------------------------------------------------------------
+      # Determine next sequential b#### release tag
+      # -----------------------------------------------------------------------
+      - name: Determine next release tag
+        id: next-tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Fetch all existing b#### tags and find the highest
+          max_num=999  # Start at b1000 to match llamacpp-rocm convention
+          while IFS= read -r tag; do
+            if [[ "${tag}" =~ ^b([0-9]+)$ ]]; then
+              num="${BASH_REMATCH[1]}"
+              if [ "${num}" -gt "${max_num}" ]; then
+                max_num="${num}"
+              fi
+            fi
+          done < <(gh release list --limit 1000 --json tagName --jq '.[].tagName' 2>/dev/null || true)
+
+          next_num=$((max_num + 1))
+          next_tag="b${next_num}"
+          echo "next_tag=${next_tag}" >> "$GITHUB_OUTPUT"
+          echo "Next release tag: ${next_tag}"
+
+      # -----------------------------------------------------------------------
+      # Collect metadata from summary artifacts
+      # -----------------------------------------------------------------------
+      - name: Collect release metadata
+        id: metadata
+        run: |
+          # Read CUDA version and commit hash from any available summary file
+          cuda_ver="unknown"
+          commit_hash="unknown"
+
+          for f in artifacts/summary-*/*.md; do
+            if [ -f "${f}" ]; then
+              v=$(grep -oP '(?<=\*\*CUDA Version:\*\* ).*' "${f}" | head -1 | xargs)
+              c=$(grep -oP '(?<=\*\*llama.cpp Commit:\*\* ).*' "${f}" | head -1 | xargs)
+              [ -n "${v}" ] && cuda_ver="${v}"
+              [ -n "${c}" ] && commit_hash="${c}"
+              break
+            fi
+          done
+
+          echo "cuda_version=${cuda_ver}" >> "$GITHUB_OUTPUT"
+          echo "llamacpp_commit=${commit_hash}" >> "$GITHUB_OUTPUT"
+          echo "build_date=$(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_OUTPUT"
+
+      # -----------------------------------------------------------------------
+      # Create the GitHub release with all zip assets
+      # -----------------------------------------------------------------------
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          next_tag="${{ steps.next-tag.outputs.next_tag }}"
+          cuda_ver="${{ steps.metadata.outputs.cuda_version }}"
+          commit="${{ steps.metadata.outputs.llamacpp_commit }}"
+          build_date="${{ steps.metadata.outputs.build_date }}"
+          sm_targets="${SM_TARGETS}"
+
+          # Build release body (mirrors llamacpp-rocm format)
+          release_body="Build Number: ${next_tag}
+Operating System(s): ubuntu
+GPU Target(s): ${sm_targets}
+CUDA Version: ${cuda_ver}
+Llama.cpp Commit Hash: ${commit}
+Build Date: ${build_date}
+
+This release includes compiled llama.cpp binaries with CUDA support for multiple
+GPU targets, with essential CUDA runtime libraries (libcublas, libcublasLt, libcurand)
+included. NVIDIA drivers must be installed separately (libcuda.so is not bundled)."
+
+          # Collect zip files from all artifact directories
+          zip_files=()
+          for artifact_dir in artifacts/llama-ubuntu-cuda-*; do
+            for zip in "${artifact_dir}"/*.zip; do
+              if [ -f "${zip}" ]; then
+                zip_files+=("${zip}")
+              fi
+            done
+          done
+
+          if [ ${#zip_files[@]} -eq 0 ]; then
+            echo "ERROR: No zip artifacts found!"
+            exit 1
+          fi
+
+          echo "Creating release ${next_tag} with ${#zip_files[@]} assets"
+          echo "Assets: ${zip_files[*]}"
+
+          gh release create "${next_tag}" \
+            --title "llamacpp-cuda ${next_tag}" \
+            --notes "${release_body}" \
+            "${zip_files[@]}"
+
+          echo "Release ${next_tag} created successfully."
