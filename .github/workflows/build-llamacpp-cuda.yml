@@ -416,7 +416,8 @@ jobs:
           sm_targets="${SM_TARGETS}"
 
           # Build release body (mirrors llamacpp-rocm format)
-          release_body="Build Number: ${next_tag}
+          release_body=$(cat <<RELEASEBODY
+Build Number: ${next_tag}
 Operating System(s): ubuntu
 GPU Target(s): ${sm_targets}
 CUDA Version: ${cuda_ver}
@@ -425,7 +426,9 @@ Build Date: ${build_date}
 
 This release includes compiled llama.cpp binaries with CUDA support for multiple
 GPU targets, with essential CUDA runtime libraries (libcublas, libcublasLt, libcurand)
-included. NVIDIA drivers must be installed separately (libcuda.so is not bundled)."
+included. NVIDIA drivers must be installed separately (libcuda.so is not bundled).
+RELEASEBODY
+          )
 
           # Collect zip files from all artifact directories
           zip_files=()
