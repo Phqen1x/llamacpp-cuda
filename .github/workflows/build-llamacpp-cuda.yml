@@ -337,6 +337,8 @@ jobs:
       (github.event.inputs.create_release == 'true' || github.event.inputs.create_release == null) &&
       (needs.build-ubuntu.result == 'success')
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout repository
