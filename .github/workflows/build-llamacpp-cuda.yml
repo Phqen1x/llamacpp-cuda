@@ -118,7 +118,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build patchelf git wget
+          sudo apt-get install -y cmake ninja-build patchelf git wget xz-utils
 
       # -----------------------------------------------------------------------
       # Install CUDA Toolkit from NVIDIA network repo
@@ -245,6 +245,29 @@ jobs:
           echo "RPATH patching complete."
 
       # -----------------------------------------------------------------------
+      # Strip debug symbols to shrink binaries and bundled CUDA .so files.
+      # --strip-unneeded is safe for shared libs: keeps symbols needed for
+      # dynamic linking but drops debug info and local symbols.
+      # -----------------------------------------------------------------------
+      - name: Strip debug symbols
+        run: |
+          build_bin_path="llama.cpp/build/bin"
+
+          echo "=== Sizes before stripping ==="
+          du -sh "${build_bin_path}"
+
+          for file in "${build_bin_path}"/*; do
+            if [ -f "${file}" ] && ! [ -L "${file}" ]; then
+              if file "${file}" | grep -qE 'ELF.*(executable|shared object)'; then
+                strip --strip-unneeded "${file}" 2>/dev/null || true
+              fi
+            fi
+          done
+
+          echo "=== Sizes after stripping ==="
+          du -sh "${build_bin_path}"
+
+      # -----------------------------------------------------------------------
       # List build artifacts for verification
       # -----------------------------------------------------------------------
       - name: List build artifacts
@@ -256,20 +279,19 @@ jobs:
           ls -la llama.cpp/build/bin/libcu*.so* 2>/dev/null || echo "No libcu*.so* found"
 
       # -----------------------------------------------------------------------
-      # Package artifacts into a zip
+      # Package artifacts into a .tar.xz archive
       # -----------------------------------------------------------------------
       - name: Package artifacts
         run: |
           sm_target="${{ matrix.sm_target }}"
           artifact_name="llama-ubuntu-cuda-${sm_target}-x64"
-          zip_name="${artifact_name}.zip"
+          archive_name="${artifact_name}.tar.xz"
 
-          cd llama.cpp/build/bin
-          zip -r "../../../${zip_name}" .
+          tar -cJf "${archive_name}" -C llama.cpp/build/bin .
 
-          echo "ARTIFACT_ZIP=${zip_name}" >> "$GITHUB_ENV"
+          echo "ARTIFACT_ARCHIVE=${archive_name}" >> "$GITHUB_ENV"
           echo "ARTIFACT_NAME=${artifact_name}" >> "$GITHUB_ENV"
-          echo "Packaged: ${zip_name}"
+          echo "Packaged: ${archive_name}"
 
       # -----------------------------------------------------------------------
       # Upload build artifact (available for 7 days)
@@ -278,7 +300,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}
-          path: ${{ env.ARTIFACT_ZIP }}
+          path: ${{ env.ARTIFACT_ARCHIVE }}
           retention-days: 7
 
       # -----------------------------------------------------------------------
@@ -322,7 +344,7 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          rm -rf llama.cpp build *.zip *.deb *.md 2>/dev/null || true
+          rm -rf llama.cpp build *.tar.xz *.deb *.md 2>/dev/null || true
           df -h
 
   # ---------------------------------------------------------------------------
@@ -401,7 +423,7 @@ jobs:
           echo "build_date=$(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_OUTPUT"
 
       # -----------------------------------------------------------------------
-      # Create the GitHub release with all zip assets
+      # Create the GitHub release with all .tar.xz assets
       # -----------------------------------------------------------------------
       - name: Create GitHub release
         env:
@@ -428,27 +450,27 @@ jobs:
             echo "included. NVIDIA drivers must be installed separately (libcuda.so is not bundled)."
           } > "${notes_file}"
 
-          # Collect zip files from all artifact directories
-          zip_files=()
+          # Collect .tar.xz archives from all artifact directories
+          archive_files=()
           for artifact_dir in artifacts/llama-ubuntu-cuda-*; do
-            for zip in "${artifact_dir}"/*.zip; do
-              if [ -f "${zip}" ]; then
-                zip_files+=("${zip}")
+            for archive in "${artifact_dir}"/*.tar.xz; do
+              if [ -f "${archive}" ]; then
+                archive_files+=("${archive}")
               fi
             done
           done
 
-          if [ ${#zip_files[@]} -eq 0 ]; then
-            echo "ERROR: No zip artifacts found!"
+          if [ ${#archive_files[@]} -eq 0 ]; then
+            echo "ERROR: No .tar.xz artifacts found!"
             exit 1
           fi
 
-          echo "Creating release ${next_tag} with ${#zip_files[@]} assets"
-          echo "Assets: ${zip_files[*]}"
+          echo "Creating release ${next_tag} with ${#archive_files[@]} assets"
+          echo "Assets: ${archive_files[*]}"
 
           gh release create "${next_tag}" \
             --title "llamacpp-cuda ${next_tag}" \
             --notes-file "${notes_file}" \
-            "${zip_files[@]}"
+            "${archive_files[@]}"
 
           echo "Release ${next_tag} created successfully."
