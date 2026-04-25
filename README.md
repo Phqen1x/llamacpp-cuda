@@ -4,7 +4,7 @@
 [![Release Date](https://img.shields.io/github/release-date/lemonade-sdk/llamacpp-cuda)](https://github.com/lemonade-sdk/llamacpp-cuda/releases/latest)
 [![License](https://img.shields.io/github/license/lemonade-sdk/llamacpp-cuda)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Ubuntu-blue)](https://github.com/lemonade-sdk/llamacpp-cuda/releases/latest)
-[![GPU Targets](https://img.shields.io/badge/GPU-sm__75%20sm__80%20sm__86%20sm__89%20sm__90-76b900)](https://github.com/lemonade-sdk/llamacpp-cuda/releases/latest)
+[![GPU Targets](https://img.shields.io/badge/GPU-sm__75%20sm__80%20sm__86%20sm__89%20sm__90%20sm__100%20sm__120-76b900)](https://github.com/lemonade-sdk/llamacpp-cuda/releases/latest)
 
 Fresh builds of [llama.cpp](https://github.com/ggml-org/llama.cpp) with NVIDIA CUDA acceleration, used as the CUDA backend for [Lemonade Server](https://github.com/lemonade-sdk/lemonade).
 
@@ -48,20 +48,22 @@ Fresh builds of [llama.cpp](https://github.com/ggml-org/llama.cpp) with NVIDIA C
 
 ## Using a Release
 
-Download the zip for your GPU's `sm_` target from the [latest release](https://github.com/lemonade-sdk/llamacpp-cuda/releases/latest):
+Download the `.tar.xz` archive for your GPU's `sm_` target from the [latest release](https://github.com/lemonade-sdk/llamacpp-cuda/releases/latest):
 
 ```
-llama-ubuntu-cuda-sm_75-x64.zip   # Turing
-llama-ubuntu-cuda-sm_80-x64.zip   # Ampere (data center)
-llama-ubuntu-cuda-sm_86-x64.zip   # Ampere (consumer)
-llama-ubuntu-cuda-sm_89-x64.zip   # Ada Lovelace
-llama-ubuntu-cuda-sm_90-x64.zip   # Hopper
+llama-ubuntu-cuda-sm_75-x64.tar.xz   # Turing
+llama-ubuntu-cuda-sm_80-x64.tar.xz   # Ampere (data center)
+llama-ubuntu-cuda-sm_86-x64.tar.xz   # Ampere (consumer)
+llama-ubuntu-cuda-sm_89-x64.tar.xz   # Ada Lovelace
+llama-ubuntu-cuda-sm_90-x64.tar.xz   # Hopper
+llama-ubuntu-cuda-sm_100-x64.tar.xz  # Blackwell (data center)
+llama-ubuntu-cuda-sm_120-x64.tar.xz  # Blackwell (consumer)
 ```
 
 Extract and run:
 
 ```bash
-unzip llama-ubuntu-cuda-sm_86-x64.zip -d llama-cuda
+mkdir llama-cuda && tar -xJf llama-ubuntu-cuda-sm_86-x64.tar.xz -C llama-cuda
 cd llama-cuda
 
 # Verify
@@ -83,13 +85,13 @@ No `LD_LIBRARY_PATH` changes needed — RPATH is set to `$ORIGIN` so the bundled
 
 ```bash
 sudo apt update
-sudo apt install -y cmake ninja-build git wget patchelf
+sudo apt install -y cmake ninja-build git wget patchelf xz-utils
 
 # Add NVIDIA CUDA network repo and install toolkit
 wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
 sudo dpkg -i cuda-keyring_1.1-1_all.deb
 sudo apt update
-sudo apt install -y cuda-toolkit-12-6
+sudo apt install -y cuda-toolkit-12-8
 
 # Add CUDA to PATH
 export PATH=/usr/local/cuda/bin:$PATH
@@ -150,7 +152,19 @@ for file in "${build_bin}"/*.so* "${build_bin}"/llama-*; do
 done
 ```
 
-### 5. Verify
+### 5. Strip debug symbols
+
+```bash
+for file in "${build_bin}"/*; do
+    if [ -f "${file}" ] && ! [ -L "${file}" ]; then
+        if file "${file}" | grep -qE 'ELF.*(executable|shared object)'; then
+            strip --strip-unneeded "${file}" 2>/dev/null || true
+        fi
+    fi
+done
+```
+
+### 6. Verify
 
 ```bash
 cd llama.cpp/build/bin
@@ -165,7 +179,7 @@ See [docs/manual_instructions.md](docs/manual_instructions.md) for more detail.
 ## Automated CI Builds
 
 Nightly builds run at 3:00 PM UTC via [GitHub Actions](.github/workflows/build-llamacpp-cuda.yml).
-Each run builds one zip per GPU target and creates a tagged release (`b1000`, `b1001`, ...).
+Each run builds one `.tar.xz` archive per GPU target and creates a tagged release (`b1000`, `b1001`, ...).
 
 The workflow can also be triggered manually from the Actions tab with optional overrides
 for `sm_targets`, `cuda_version`, and `llamacpp_version`.
@@ -214,11 +228,12 @@ This script checks Ubuntu version, `nvidia-smi`, `nvcc` version, binary executab
 ## Release Asset Naming
 
 ```
-llama-ubuntu-cuda-{sm_target}-x64.zip
+llama-ubuntu-cuda-{sm_target}-x64.tar.xz
 ```
 
-Each zip contains `llama-server`, all llama.cpp binaries, and the bundled CUDA runtime
-libraries. Release tags follow the sequential `b####` convention starting at `b1000`.
+Each archive contains `llama-server`, all llama.cpp binaries, and the bundled CUDA runtime
+libraries (stripped of debug symbols). Release tags follow the sequential `b####` convention
+starting at `b1000`.
 
 ---
 
