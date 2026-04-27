@@ -524,8 +524,9 @@ jobs:
           Get-ChildItem -Path "llama.cpp\build\bin" | Format-Table Name, Length -AutoSize
           Write-Host ""
           Write-Host "=== CUDA DLLs bundled ==="
-          Get-ChildItem -Path "llama.cpp\build\bin" -Filter "*cuda*.dll","*cublas*.dll","*curand*.dll" `
-            -ErrorAction SilentlyContinue | Format-Table Name, Length -AutoSize
+          Get-ChildItem -Path "llama.cpp\build\bin" |
+            Where-Object { $_.Name -match '(cuda|cublas|curand).*\.dll$' } |
+            Format-Table Name, Length -AutoSize
 
       # -----------------------------------------------------------------------
       # Package artifacts into a .7z archive.
