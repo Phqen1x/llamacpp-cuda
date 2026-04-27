@@ -416,7 +416,7 @@ jobs:
         with:
           cuda: ${{ steps.cuda-ver-win.outputs.cuda_win_version }}
           method: network
-          sub-packages: '["nvcc", "cudart", "cublas", "curand", "visual_studio_integration"]'
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "curand", "curand_dev", "visual_studio_integration"]'
 
       # -----------------------------------------------------------------------
       # Detect installed CUDA version for release metadata
