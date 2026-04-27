@@ -412,7 +412,7 @@ jobs:
       # Install CUDA Toolkit via Jimver action (sets CUDA_PATH env var)
       # -----------------------------------------------------------------------
       - name: Install CUDA Toolkit
-        uses: Jimver/cuda-toolkit@v0.2.19
+        uses: Jimver/cuda-toolkit@v0.2.35
         with:
           cuda: ${{ steps.cuda-ver-win.outputs.cuda_win_version }}
           method: network
