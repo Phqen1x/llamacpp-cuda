@@ -51,6 +51,8 @@ jobs:
     outputs:
       ubuntu_matrix: ${{ steps.set-matrix.outputs.ubuntu_matrix }}
       should_build_ubuntu: ${{ steps.set-matrix.outputs.should_build_ubuntu }}
+      windows_matrix: ${{ steps.set-matrix.outputs.windows_matrix }}
+      should_build_windows: ${{ steps.set-matrix.outputs.should_build_windows }}
 
     steps:
       - name: Parse build matrix from inputs
@@ -60,26 +62,36 @@ jobs:
           # Parse SM_TARGETS into a JSON array for the matrix
           sm_targets="${SM_TARGETS}"
           ubuntu_matrix="[]"
+          windows_matrix="[]"
           should_build_ubuntu="false"
+          should_build_windows="false"
 
           IFS=',' read -ra targets <<< "${sm_targets}"
-          ubuntu_entries="[]"
+          all_entries="[]"
           for target in "${targets[@]}"; do
             target=$(echo "${target}" | xargs)  # trim whitespace
             if [ -n "${target}" ]; then
-              ubuntu_entries=$(echo "${ubuntu_entries}" | \
+              all_entries=$(echo "${all_entries}" | \
                 python3 -c "import sys, json; a=json.load(sys.stdin); a.append({'sm_target':'${target}'}); print(json.dumps(a))")
             fi
           done
 
           if echo "${OPERATING_SYSTEMS}" | grep -q "ubuntu"; then
-            ubuntu_matrix="${ubuntu_entries}"
+            ubuntu_matrix="${all_entries}"
             should_build_ubuntu="true"
+          fi
+
+          if echo "${OPERATING_SYSTEMS}" | grep -q "windows"; then
+            windows_matrix="${all_entries}"
+            should_build_windows="true"
           fi
 
           echo "ubuntu_matrix=${ubuntu_matrix}" >> "$GITHUB_OUTPUT"
           echo "should_build_ubuntu=${should_build_ubuntu}" >> "$GITHUB_OUTPUT"
+          echo "windows_matrix=${windows_matrix}" >> "$GITHUB_OUTPUT"
+          echo "should_build_windows=${should_build_windows}" >> "$GITHUB_OUTPUT"
           echo "Ubuntu matrix: ${ubuntu_matrix}"
+          echo "Windows matrix: ${windows_matrix}"
 
   # ---------------------------------------------------------------------------
   # Ubuntu build job (matrix over sm_target)
@@ -348,16 +360,251 @@ jobs:
           df -h
 
   # ---------------------------------------------------------------------------
+  # Windows build job (matrix over sm_target)
+  # ---------------------------------------------------------------------------
+  build-windows:
+    needs: prepare-matrix
+    if: needs.prepare-matrix.outputs.should_build_windows == 'true'
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.prepare-matrix.outputs.windows_matrix) }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Clean any leftover build artifacts from previous runs
+      # -----------------------------------------------------------------------
+      - name: Clean up existing directories
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force llama.cpp -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force build   -ErrorAction SilentlyContinue
+
+      # -----------------------------------------------------------------------
+      # Install Ninja (not pre-installed on windows-2022 runners)
+      # -----------------------------------------------------------------------
+      - name: Install Ninja
+        run: choco install ninja -y
+
+      # -----------------------------------------------------------------------
+      # Convert CUDA version from apt format ("12-8") to semver ("12.8.0")
+      # for the Jimver cuda-toolkit action, with a safe fallback for "latest"
+      # -----------------------------------------------------------------------
+      - name: Resolve CUDA version for Windows
+        id: cuda-ver-win
+        shell: pwsh
+        run: |
+          $aptVer = "$env:CUDA_VERSION"
+          if ($aptVer -eq "latest") {
+            $winVer = "12.8.0"
+          } else {
+            $parts  = $aptVer.Split("-")
+            $winVer = "$($parts[0]).$($parts[1]).0"
+          }
+          echo "cuda_win_version=$winVer" >> $env:GITHUB_OUTPUT
+          echo "Resolved CUDA Windows version: $winVer"
+
+      # -----------------------------------------------------------------------
+      # Install CUDA Toolkit via Jimver action (sets CUDA_PATH env var)
+      # -----------------------------------------------------------------------
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          cuda: ${{ steps.cuda-ver-win.outputs.cuda_win_version }}
+          method: network
+          sub-packages: '["nvcc", "cudart", "cublas", "curand", "visual_studio_integration"]'
+
+      # -----------------------------------------------------------------------
+      # Detect installed CUDA version for release metadata
+      # -----------------------------------------------------------------------
+      - name: Detect CUDA version
+        id: detect-cuda
+        shell: pwsh
+        run: |
+          $output   = & nvcc --version 2>&1 | Out-String
+          $match    = [regex]::Match($output, 'release (\d+\.\d+)')
+          $detected = if ($match.Success) { $match.Groups[1].Value } else { "unknown" }
+          echo "cuda_version=$detected" >> $env:GITHUB_OUTPUT
+          echo "Detected CUDA version: $detected"
+
+      # -----------------------------------------------------------------------
+      # Clone llama.cpp — respect llamacpp_version input
+      # -----------------------------------------------------------------------
+      - name: Clone llama.cpp
+        shell: pwsh
+        run: |
+          if ($env:LLAMACPP_VERSION -eq "latest") {
+            git clone --depth 1 https://github.com/ggml-org/llama.cpp.git
+          } else {
+            git clone --depth 1 --branch $env:LLAMACPP_VERSION `
+              https://github.com/ggml-org/llama.cpp.git
+          }
+          $hash = git -C llama.cpp rev-parse --short=5 HEAD
+          echo "LLAMACPP_COMMIT_HASH=$hash" >> $env:GITHUB_ENV
+          echo "llama.cpp commit: $hash"
+
+      # -----------------------------------------------------------------------
+      # Map sm_target to the numeric CUDA architecture value for CMake
+      # -----------------------------------------------------------------------
+      - name: Map sm_target to CMake architecture
+        id: map-arch
+        shell: pwsh
+        run: |
+          $smTarget   = "${{ matrix.sm_target }}"
+          $cmakeArch  = $smTarget -replace '^sm_', ''
+          echo "cmake_arch=$cmakeArch" >> $env:GITHUB_OUTPUT
+          echo "Building for sm_target=$smTarget, cmake_arch=$cmakeArch"
+
+      # -----------------------------------------------------------------------
+      # Activate MSVC environment so Ninja can find cl.exe and link.exe
+      # -----------------------------------------------------------------------
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # -----------------------------------------------------------------------
+      # Build llama.cpp with CUDA (Ninja + MSVC + nvcc)
+      # -----------------------------------------------------------------------
+      - name: Build llama.cpp + CUDA
+        shell: cmd
+        run: |
+          set cmake_arch=${{ steps.map-arch.outputs.cmake_arch }}
+
+          cmake -S llama.cpp -B llama.cpp\build -G Ninja ^
+            -DGGML_CUDA=ON ^
+            -DCMAKE_CUDA_ARCHITECTURES="%cmake_arch%" ^
+            -DBUILD_SHARED_LIBS=ON ^
+            -DLLAMA_BUILD_TESTS=OFF ^
+            -DGGML_OPENMP=OFF ^
+            -DGGML_NATIVE=OFF ^
+            -DGGML_STATIC=OFF ^
+            -DGGML_RPC=ON ^
+            -DLLAMA_BUILD_BORINGSSL=ON ^
+            -DCMAKE_BUILD_TYPE=Release
+
+          cmake --build llama.cpp\build --config Release -j %NUMBER_OF_PROCESSORS%
+
+      # -----------------------------------------------------------------------
+      # Copy required CUDA runtime DLLs into build\bin
+      # nvcuda.dll is driver-provided and must NOT be bundled
+      # -----------------------------------------------------------------------
+      - name: Copy required CUDA libraries
+        shell: pwsh
+        run: |
+          $buildBin = "llama.cpp\build\bin"
+          $cudaBin  = "$env:CUDA_PATH\bin"
+
+          Write-Host "Copying CUDA runtime DLLs from $cudaBin to $buildBin"
+
+          foreach ($pattern in @("cudart64_*.dll", "cublas64_*.dll", "cublasLt64_*.dll", "curand64_*.dll")) {
+            $files = Get-ChildItem -Path $cudaBin -Filter $pattern -ErrorAction SilentlyContinue
+            if ($files.Count -eq 0) {
+              Write-Host "Warning: no files matched $pattern in $cudaBin"
+            }
+            foreach ($f in $files) {
+              Copy-Item $f.FullName $buildBin -Verbose
+            }
+          }
+
+          Write-Host ""
+          Write-Host "Note: nvcuda.dll is provided by the NVIDIA driver and is NOT bundled."
+
+      # -----------------------------------------------------------------------
+      # List build artifacts for verification
+      # -----------------------------------------------------------------------
+      - name: List build artifacts
+        shell: pwsh
+        run: |
+          Write-Host "=== Build artifacts ==="
+          Get-ChildItem -Path "llama.cpp\build\bin" | Format-Table Name, Length -AutoSize
+          Write-Host ""
+          Write-Host "=== CUDA DLLs bundled ==="
+          Get-ChildItem -Path "llama.cpp\build\bin" -Filter "*cuda*.dll","*cublas*.dll","*curand*.dll" `
+            -ErrorAction SilentlyContinue | Format-Table Name, Length -AutoSize
+
+      # -----------------------------------------------------------------------
+      # Package artifacts into a zip (standard for Windows consumers)
+      # -----------------------------------------------------------------------
+      - name: Package artifacts
+        shell: pwsh
+        run: |
+          $smTarget     = "${{ matrix.sm_target }}"
+          $artifactName = "llama-windows-cuda-$smTarget-x64"
+          $zipName      = "$artifactName.zip"
+
+          Compress-Archive -Path "llama.cpp\build\bin\*" -DestinationPath $zipName
+
+          echo "ARTIFACT_ZIP=$zipName"      >> $env:GITHUB_ENV
+          echo "ARTIFACT_NAME=$artifactName" >> $env:GITHUB_ENV
+          echo "Packaged: $zipName"
+
+      # -----------------------------------------------------------------------
+      # Upload build artifact (available for 7 days)
+      # -----------------------------------------------------------------------
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.ARTIFACT_ZIP }}
+          retention-days: 7
+
+      # -----------------------------------------------------------------------
+      # Create per-build summary markdown artifact (aggregated by create-release)
+      # -----------------------------------------------------------------------
+      - name: Create build summary
+        shell: pwsh
+        run: |
+          $smTarget    = "${{ matrix.sm_target }}"
+          $summaryFile = "summary-windows-$smTarget.md"
+          $buildDate   = [System.DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss') + ' UTC'
+
+          @"
+          ## Build: windows / $smTarget
+          - **OS:** Windows
+          - **GPU Target:** $smTarget
+          - **CUDA Version:** ${{ steps.detect-cuda.outputs.cuda_version }}
+          - **llama.cpp Commit:** $env:LLAMACPP_COMMIT_HASH
+          - **Build Date:** $buildDate
+          "@ | Set-Content -Path $summaryFile
+
+          echo "Summary written to $summaryFile"
+
+      - name: Upload build summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: summary-windows-${{ matrix.sm_target }}
+          path: summary-windows-${{ matrix.sm_target }}.md
+          retention-days: 7
+
+      # -----------------------------------------------------------------------
+      # Always clean up to recover disk space on shared runners
+      # -----------------------------------------------------------------------
+      - name: Cleanup
+        if: always()
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force llama.cpp -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force build     -ErrorAction SilentlyContinue
+          Remove-Item -Force *.zip              -ErrorAction SilentlyContinue
+          Remove-Item -Force *.md               -ErrorAction SilentlyContinue
+
+  # ---------------------------------------------------------------------------
   # Create GitHub release — runs after all build jobs complete
   # ---------------------------------------------------------------------------
   create-release:
-    needs: [prepare-matrix, build-ubuntu]
-    # Run if: not a PR, all completed (regardless of result), and create_release=true
+    needs: [prepare-matrix, build-ubuntu, build-windows]
+    # Run if: not a PR, all completed (regardless of result), create_release=true,
+    # and at least one OS build succeeded
     if: |
       always() &&
       github.event_name != 'pull_request' &&
       (github.event.inputs.create_release == 'true' || github.event.inputs.create_release == null) &&
-      (needs.build-ubuntu.result == 'success')
+      (needs.build-ubuntu.result == 'success' || needs.build-windows.result == 'success')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -439,7 +686,7 @@ jobs:
           notes_file=$(mktemp)
           {
             echo "Build Number: ${next_tag}"
-            echo "Operating System(s): ubuntu"
+            echo "Operating System(s): ${OPERATING_SYSTEMS}"
             echo "GPU Target(s): ${sm_targets}"
             echo "CUDA Version: ${cuda_ver}"
             echo "Llama.cpp Commit Hash: ${commit}"
@@ -447,30 +694,38 @@ jobs:
             echo ""
             echo "This release includes compiled llama.cpp binaries with CUDA support for multiple"
             echo "GPU targets, with essential CUDA runtime libraries (libcublas, libcublasLt, libcurand)"
-            echo "included. NVIDIA drivers must be installed separately (libcuda.so is not bundled)."
+            echo "included. NVIDIA drivers must be installed separately."
+            echo ""
+            echo "Linux:   .tar.xz archives — extract with: tar -xJf <archive>.tar.xz"
+            echo "Windows: .zip archives    — extract with Explorer or Expand-Archive"
           } > "${notes_file}"
 
-          # Collect .tar.xz archives from all artifact directories
-          archive_files=()
+          # Collect all release assets:
+          #   Linux builds  -> .tar.xz (llama-ubuntu-cuda-*)
+          #   Windows builds -> .zip   (llama-windows-cuda-*)
+          asset_files=()
           for artifact_dir in artifacts/llama-ubuntu-cuda-*; do
-            for archive in "${artifact_dir}"/*.tar.xz; do
-              if [ -f "${archive}" ]; then
-                archive_files+=("${archive}")
-              fi
+            for f in "${artifact_dir}"/*.tar.xz; do
+              [ -f "${f}" ] && asset_files+=("${f}")
+            done
+          done
+          for artifact_dir in artifacts/llama-windows-cuda-*; do
+            for f in "${artifact_dir}"/*.zip; do
+              [ -f "${f}" ] && asset_files+=("${f}")
             done
           done
 
-          if [ ${#archive_files[@]} -eq 0 ]; then
-            echo "ERROR: No .tar.xz artifacts found!"
+          if [ ${#asset_files[@]} -eq 0 ]; then
+            echo "ERROR: No release assets found!"
             exit 1
           fi
 
-          echo "Creating release ${next_tag} with ${#archive_files[@]} assets"
-          echo "Assets: ${archive_files[*]}"
+          echo "Creating release ${next_tag} with ${#asset_files[@]} assets"
+          echo "Assets: ${asset_files[*]}"
 
           gh release create "${next_tag}" \
             --title "llamacpp-cuda ${next_tag}" \
             --notes-file "${notes_file}" \
-            "${archive_files[@]}"
+            "${asset_files[@]}"
 
           echo "Release ${next_tag} created successfully."
