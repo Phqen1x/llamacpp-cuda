@@ -6,7 +6,7 @@ on:
       operating_systems:
         description: "Operating systems to build for (comma-separated)"
         required: false
-        default: "ubuntu"
+        default: "ubuntu,windows"
         type: string
       sm_targets:
         description: "CUDA sm_ targets to build for (comma-separated)"
@@ -37,7 +37,7 @@ on:
     - cron: "0 15 * * *"
 
 env:
-  OPERATING_SYSTEMS: ${{ github.event.inputs.operating_systems || 'ubuntu' }}
+  OPERATING_SYSTEMS: ${{ github.event.inputs.operating_systems || 'ubuntu,windows' }}
   SM_TARGETS: ${{ github.event.inputs.sm_targets || 'sm_75,sm_80,sm_86,sm_89,sm_90,sm_100,sm_120' }}
   CUDA_VERSION: ${{ github.event.inputs.cuda_version || '12-8' }}
   LLAMACPP_VERSION: ${{ github.event.inputs.llamacpp_version || 'latest' }}
@@ -528,20 +528,24 @@ jobs:
             -ErrorAction SilentlyContinue | Format-Table Name, Length -AutoSize
 
       # -----------------------------------------------------------------------
-      # Package artifacts into a zip (standard for Windows consumers)
+      # Package artifacts into a .7z archive.
+      # 7-zip is pre-installed on all GitHub windows-2022 runners and gives
+      # xz-class LZMA2 compression, keeping assets well under GitHub's 2 GB
+      # release limit that plain zip cannot satisfy for CUDA builds.
       # -----------------------------------------------------------------------
       - name: Package artifacts
         shell: pwsh
         run: |
           $smTarget     = "${{ matrix.sm_target }}"
           $artifactName = "llama-windows-cuda-$smTarget-x64"
-          $zipName      = "$artifactName.zip"
+          $archiveName  = "$artifactName.7z"
 
-          Compress-Archive -Path "llama.cpp\build\bin\*" -DestinationPath $zipName
+          # -mx=9 maximum LZMA2 compression; -mmt uses all CPU threads
+          & 7z a -t7z -mx=9 -mmt $archiveName "llama.cpp\build\bin\*"
 
-          echo "ARTIFACT_ZIP=$zipName"      >> $env:GITHUB_ENV
-          echo "ARTIFACT_NAME=$artifactName" >> $env:GITHUB_ENV
-          echo "Packaged: $zipName"
+          echo "ARTIFACT_ARCHIVE=$archiveName" >> $env:GITHUB_ENV
+          echo "ARTIFACT_NAME=$artifactName"   >> $env:GITHUB_ENV
+          echo "Packaged: $archiveName"
 
       # -----------------------------------------------------------------------
       # Upload build artifact (available for 7 days)
@@ -550,7 +554,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}
-          path: ${{ env.ARTIFACT_ZIP }}
+          path: ${{ env.ARTIFACT_ARCHIVE }}
           retention-days: 7
 
       # -----------------------------------------------------------------------
@@ -590,7 +594,7 @@ jobs:
         run: |
           Remove-Item -Recurse -Force llama.cpp -ErrorAction SilentlyContinue
           Remove-Item -Recurse -Force build     -ErrorAction SilentlyContinue
-          Remove-Item -Force *.zip              -ErrorAction SilentlyContinue
+          Remove-Item -Force *.7z               -ErrorAction SilentlyContinue
           Remove-Item -Force *.md               -ErrorAction SilentlyContinue
 
   # ---------------------------------------------------------------------------
@@ -697,12 +701,12 @@ jobs:
             echo "included. NVIDIA drivers must be installed separately."
             echo ""
             echo "Linux:   .tar.xz archives — extract with: tar -xJf <archive>.tar.xz"
-            echo "Windows: .zip archives    — extract with Explorer or Expand-Archive"
+            echo "Windows: .7z archives     — extract with: 7-Zip (https://www.7-zip.org)"
           } > "${notes_file}"
 
           # Collect all release assets:
-          #   Linux builds  -> .tar.xz (llama-ubuntu-cuda-*)
-          #   Windows builds -> .zip   (llama-windows-cuda-*)
+          #   Linux builds   -> .tar.xz (llama-ubuntu-cuda-*)
+          #   Windows builds -> .7z     (llama-windows-cuda-*)
           asset_files=()
           for artifact_dir in artifacts/llama-ubuntu-cuda-*; do
             for f in "${artifact_dir}"/*.tar.xz; do
@@ -710,7 +714,7 @@ jobs:
             done
           done
           for artifact_dir in artifacts/llama-windows-cuda-*; do
-            for f in "${artifact_dir}"/*.zip; do
+            for f in "${artifact_dir}"/*.7z; do
               [ -f "${f}" ] && asset_files+=("${f}")
             done
           done
