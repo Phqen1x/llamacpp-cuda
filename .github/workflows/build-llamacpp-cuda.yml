@@ -540,9 +540,12 @@ jobs:
           $smTarget     = "${{ matrix.sm_target }}"
           $artifactName = "llama-windows-cuda-$smTarget-x64"
           $archiveName  = "$artifactName.7z"
+          $archivePath  = Join-Path (Get-Location) $archiveName
 
-          # -mx=9 maximum LZMA2 compression; -mmt uses all CPU threads
-          & 7z a -t7z -mx=9 -mmt $archiveName "llama.cpp\build\bin\*"
+          # cd into bin so 7z stores files at archive root, not llama.cpp\build\bin\*
+          Push-Location "llama.cpp\build\bin"
+          & 7z a -t7z -mx=9 -mmt $archivePath *
+          Pop-Location
 
           echo "ARTIFACT_ARCHIVE=$archiveName" >> $env:GITHUB_ENV
           echo "ARTIFACT_NAME=$artifactName"   >> $env:GITHUB_ENV
